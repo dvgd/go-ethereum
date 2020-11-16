@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -33,8 +32,6 @@ import (
 
 const (
 	ticketTimeBucketLen = time.Minute
-	timeWindow          = 10 // * ticketTimeBucketLen
-	wantTicketsInWindow = 10
 	collectFrequency    = time.Second * 30
 	registerFrequency   = time.Second * 60
 	maxCollectDebt      = 10
@@ -139,7 +136,6 @@ type ticketStore struct {
 
 	lastBucketFetched timeBucket
 	nextTicketCached  *ticketRef
-	nextTicketReg     mclock.AbsTime
 
 	searchTopicMap        map[Topic]searchTopic
 	nextTopicQueryCleanup mclock.AbsTime
@@ -268,57 +264,6 @@ func (s *ticketStore) nextSearchLookup(topic Topic) lookupInfo {
 	return target
 }
 
-// ticketsInWindow returns the tickets of a given topic in the registration window.
-func (s *ticketStore) ticketsInWindow(topic Topic) []ticketRef {
-	// Sanity check that the topic still exists before operating on it
-	if s.tickets[topic] == nil {
-		log.Warn("Listing non-existing discovery tickets", "topic", topic)
-		return nil
-	}
-	// Gather all the tickers in the next time window
-	var tickets []ticketRef
-
-	buckets := s.tickets[topic].buckets
-	for idx := timeBucket(0); idx < timeWindow; idx++ {
-		tickets = append(tickets, buckets[s.lastBucketFetched+idx]...)
-	}
-	log.Trace("Retrieved discovery registration tickets", "topic", topic, "from", s.lastBucketFetched, "tickets", len(tickets))
-	return tickets
-}
-
-func (s *ticketStore) removeExcessTickets(t Topic) {
-	tickets := s.ticketsInWindow(t)
-	if len(tickets) <= wantTicketsInWindow {
-		return
-	}
-	sort.Sort(ticketRefByWaitTime(tickets))
-	for _, r := range tickets[wantTicketsInWindow:] {
-		s.removeTicketRef(r)
-	}
-}
-
-type ticketRefByWaitTime []ticketRef
-
-// Len is the number of elements in the collection.
-func (s ticketRefByWaitTime) Len() int {
-	return len(s)
-}
-
-func (r ticketRef) waitTime() mclock.AbsTime {
-	return r.t.regTime[r.idx] - r.t.issueTime
-}
-
-// Less reports whether the element with
-// index i should sort before the element with index j.
-func (s ticketRefByWaitTime) Less(i, j int) bool {
-	return s[i].waitTime() < s[j].waitTime()
-}
-
-// Swap swaps the elements with indexes i and j.
-func (s ticketRefByWaitTime) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-
 func (s *ticketStore) addTicketRef(r ticketRef) {
 	topic := r.t.topics[r.idx]
 	tickets := s.tickets[topic]
@@ -350,7 +295,7 @@ func (s *ticketStore) nextFilteredTicket() (*ticketRef, time.Duration) {
 
 		regTime := now + mclock.AbsTime(wait)
 		topic := ticket.t.topics[ticket.idx]
-		if regTime >= s.tickets[topic].nextReg {
+		if s.tickets[topic] != nil && regTime >= s.tickets[topic].nextReg {
 			return ticket, wait
 		}
 		s.removeTicketRef(*ticket)
@@ -420,11 +365,14 @@ func (s *ticketStore) nextRegisterableTicket() (*ticketRef, time.Duration) {
 func (s *ticketStore) removeTicketRef(ref ticketRef) {
 	log.Trace("Removing discovery ticket reference", "node", ref.t.node.ID, "serial", ref.t.serial)
 
+	// Make nextRegisterableTicket return the next available ticket.
+	s.nextTicketCached = nil
+
 	topic := ref.topic()
 	tickets := s.tickets[topic]
 
 	if tickets == nil {
-		log.Warn("Removing tickets from unknown topic", "topic", topic)
+		log.Trace("Removing tickets from unknown topic", "topic", topic)
 		return
 	}
 	bucket := timeBucket(ref.t.regTime[ref.idx] / mclock.AbsTime(ticketTimeBucketLen))
@@ -450,9 +398,6 @@ func (s *ticketStore) removeTicketRef(ref ticketRef) {
 		delete(s.nodes, ref.t.node)
 		delete(s.nodeLastReq, ref.t.node)
 	}
-
-	// Make nextRegisterableTicket return the next available ticket.
-	s.nextTicketCached = nil
 }
 
 type lookupInfo struct {
@@ -494,13 +439,13 @@ func (s *ticketStore) registerLookupDone(lookup lookupInfo, nodes []*Node, ping 
 	}
 }
 
-func (s *ticketStore) searchLookupDone(lookup lookupInfo, nodes []*Node, ping func(n *Node) []byte, query func(n *Node, topic Topic) []byte) {
+func (s *ticketStore) searchLookupDone(lookup lookupInfo, nodes []*Node, query func(n *Node, topic Topic) []byte) {
 	now := mclock.Now()
 	for i, n := range nodes {
 		if i == 0 || (binary.BigEndian.Uint64(n.sha[:8])^binary.BigEndian.Uint64(lookup.target[:8])) < s.radius[lookup.topic].minRadius {
 			if lookup.radiusLookup {
 				if lastReq, ok := s.nodeLastReq[n]; !ok || time.Duration(now-lastReq.time) > radiusTC {
-					s.nodeLastReq[n] = reqInfo{pingHash: ping(n), lookup: lookup, time: now}
+					s.nodeLastReq[n] = reqInfo{pingHash: nil, lookup: lookup, time: now}
 				}
 			} // else {
 			if s.canQueryTopic(n, lookup.topic) {
@@ -563,15 +508,6 @@ func (s *ticketStore) addTicket(localTime mclock.AbsTime, pingHash []byte, ticke
 		s.nextTicketCached = nil
 		s.nodes[ticket.node] = ticket
 	}
-}
-
-func (s *ticketStore) getNodeTicket(node *Node) *ticket {
-	if s.nodes[node] == nil {
-		log.Trace("Retrieving node ticket", "node", node.ID, "serial", nil)
-	} else {
-		log.Trace("Retrieving node ticket", "node", node.ID, "serial", s.nodes[node].serial)
-	}
-	return s.nodes[node]
 }
 
 func (s *ticketStore) canQueryTopic(node *Node, topic Topic) bool {
@@ -768,12 +704,6 @@ func globalRandRead(b []byte) {
 		val >>= 8
 		pos--
 	}
-}
-
-func (r *topicRadius) isInRadius(addrHash common.Hash) bool {
-	nodePrefix := binary.BigEndian.Uint64(addrHash[0:8])
-	dist := nodePrefix ^ r.topicHashPrefix
-	return dist < r.radius
 }
 
 func (r *topicRadius) chooseLookupBucket(a, b int) int {
