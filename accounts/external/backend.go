@@ -212,6 +212,20 @@ func (api *ExternalSigner) SignTx(account accounts.Account, tx *types.Transactio
 		To:       to,
 		From:     common.NewMixedcaseAddress(account.Address),
 	}
+	// We should request the default chain id that we're operating with
+	// (the chain we're executing on)
+	if chainID != nil {
+		args.ChainID = (*hexutil.Big)(chainID)
+	}
+	if tx.Type() != types.LegacyTxType {
+		// However, if the user asked for a particular chain id, then we should
+		// use that instead.
+		if tx.ChainId() != nil {
+			args.ChainID = (*hexutil.Big)(tx.ChainId())
+		}
+		accessList := tx.AccessList()
+		args.AccessList = &accessList
+	}
 	var res signTransactionResult
 	if err := api.client.Call(&res, "account_signTransaction", args); err != nil {
 		return nil, err

@@ -173,13 +173,13 @@ func TestPrestateTracerCreate2(t *testing.T) {
 	_, statedb := tests.MakePreState(rawdb.NewMemoryDatabase(), alloc, false)
 
 	// Create the tracer, the EVM environment and run it
-	tracer, err := New("prestateTracer")
+	tracer, err := New("prestateTracer", txContext)
 	if err != nil {
 		t.Fatalf("failed to create call tracer: %v", err)
 	}
 	evm := vm.NewEVM(context, txContext, statedb, params.MainnetChainConfig, vm.Config{Debug: true, Tracer: tracer})
 
-	msg, err := tx.AsMessage(signer)
+	msg, err := tx.AsMessage(signer, nil)
 	if err != nil {
 		t.Fatalf("failed to prepare transaction for tracing: %v", err)
 	}
@@ -248,13 +248,13 @@ func TestCallTracer(t *testing.T) {
 			_, statedb := tests.MakePreState(rawdb.NewMemoryDatabase(), test.Genesis.Alloc, false)
 
 			// Create the tracer, the EVM environment and run it
-			tracer, err := New("callTracer")
+			tracer, err := New("callTracer", txContext)
 			if err != nil {
 				t.Fatalf("failed to create call tracer: %v", err)
 			}
 			evm := vm.NewEVM(context, txContext, statedb, test.Genesis.Config, vm.Config{Debug: true, Tracer: tracer})
 
-			msg, err := tx.AsMessage(signer)
+			msg, err := tx.AsMessage(signer, nil)
 			if err != nil {
 				t.Fatalf("failed to prepare transaction for tracing: %v", err)
 			}
